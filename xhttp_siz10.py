@@ -27,7 +27,7 @@ from main import (
     stats,
 )
 from relay_vless import check_and_use, parse_vless_header
-from speed_limit import throttle
+from speed_limit import record_ip_active, throttle
 
 router = APIRouter()
 
@@ -211,6 +211,7 @@ async def _get_or_create_session(uuid: str, mode: str, session_id: str, ip: str 
         if not is_ip_allowed(link, uuid, ip):
             logger.warning(f"🚫 XHTTP[{mode}] rejected uuid={uuid[:8]} ip={ip} (ip limit reached)")
             raise HTTPException(status_code=403, detail="ip limit reached")
+        record_ip_active(uuid, ip)
 
         conn_id = secrets.token_urlsafe(6)
         connections[conn_id] = {

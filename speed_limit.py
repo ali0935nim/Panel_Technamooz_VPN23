@@ -1,26 +1,27 @@
 # speed_limit.py
-# محدودیت سرعت (Bandwidth Throttling) به‌ازای هر کانفیگ — پیاده‌سازی با الگوی Token Bucket
-# جدا شده از relay_vless.py و xhttp_siz10.py؛ هر دو این ماژول رو صدا می‌زنن (منطق اونا دست‌نخورده).
+# ══════════════════════════════════════════════════════════════════════════════
+# Panel Technamooz v1.0.0.0 stable
+# ماژول کنترل پهنای باند و ردیابی آی‌پی‌های فعال با الگوریتم Token Bucket و Sliding TTL
+# توسعه‌یافته توسط تیم Technamooz با مدیریت amirparsa
+# ══════════════════════════════════════════════════════════════════════════════
 
 import asyncio
 import time
 
-from main import LINKS
-
-# هر uuid یک Bucket جدا داره؛ Bucket با نرخ صفر (بدون محدودیت) اصلاً ساخته نمی‌شه.
 _buckets: dict = {}
+_ip_activity: dict = {}  # {uuid: {ip: last_active_timestamp}}
 
-MIN_RATE = 1024          # حداقل نرخ برای جلوگیری از تقسیم بر صفر یا سرعت‌های غیرمنطقی (1 KB/s)
-MIN_BURST = 16 * 1024    # حداقل ظرفیت بافر burst (برای اینکه چانک‌های کوچیک بی‌دلیل صف نکشن)
+MIN_RATE = 1024          # 1 KB/s minimum
+MIN_BURST = 32 * 1024    # 32 KB burst buffer
+IP_TTL_SECONDS = 300     # 5 minutes TTL for active IPs
 
 
 class _Bucket:
     __slots__ = ("capacity", "last", "rate", "tokens")
 
     def __init__(self, rate_bytes_per_sec: float):
-        self.rate = max(rate_bytes_per_sec, MIN_RATE)
-        # ظرفیت burst: معادل ۱ ثانیه از نرخ مجاز (حداقل ۱۶ کیلوبایت) تا چانک‌های نرمال گیر نکنن
-        self.capacity = max(self.rate, MIN_BURST)
+        self.rate = max(float(rate_bytes_per_sec), float(MIN_RATE))
+        self.capacity = max(self.rate, float(MIN_BURST))
         self.tokens = self.capacity
         self.last = time.monotonic()
 
@@ -32,7 +33,6 @@ class _Bucket:
             self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
 
     async def consume(self, n: int):
-        """تا وقتی n بایت توکن آماده نشه، به‌صورت غیرمسدودکننده (async sleep) صبر می‌کنه."""
         while True:
             self._refill()
             if self.tokens >= n:
@@ -40,24 +40,27 @@ class _Bucket:
                 return
             deficit = n - self.tokens
             wait = deficit / self.rate
-            # سقف sleep کوتاهه تا اگه نرخ کانفیگ از پنل تغییر کرد، زود متوجه بشیم
-            await asyncio.sleep(min(max(wait, 0.004), 0.5))
+            await asyncio.sleep(min(max(wait, 0.002), 0.3))
 
 
 def _get_bucket(uuid: str, rate: int) -> _Bucket:
     b = _buckets.get(uuid)
-    if b is None or b.rate != max(rate, MIN_RATE):
+    if b is None or b.rate != max(float(rate), float(MIN_RATE)):
         b = _Bucket(rate)
         _buckets[uuid] = b
     return b
 
 
-async def throttle(uuid: str, nbytes: int):
-    """اگه کانفیگ محدودیت سرعت داشته باشه (speed_limit_bytes > 0)، تا نوبتِ ارسال
-    این تعداد بایت صبر می‌کنه. اگه محدودیتی نباشه، فوری برمی‌گرده (بدون سربار محسوس)."""
+async def throttle(uuid: str, nbytes: int, links_dict: dict | None = None):
     if nbytes <= 0:
         return
-    link = LINKS.get(uuid)
+    if links_dict is None:
+        try:
+            from main import LINKS
+            links_dict = LINKS
+        except Exception:
+            return
+    link = (links_dict or {}).get(uuid)
     rate = int((link or {}).get("speed_limit_bytes", 0) or 0)
     if rate <= 0:
         return
@@ -66,6 +69,35 @@ async def throttle(uuid: str, nbytes: int):
 
 
 def reset_bucket(uuid: str):
-    """وقتی محدودیت سرعت یک کانفیگ از پنل تغییر کرد یا کانفیگ حذف شد صدا زده می‌شه،
-    تا بافر توکن قدیمی پاک بشه (نرخ جدید در فراخوانی بعدی throttle از نو ساخته می‌شه)."""
     _buckets.pop(uuid, None)
+
+
+# ── Active IP Tracking with Auto-Expiring TTL ─────────────────────────────────
+
+def record_ip_active(uuid: str, ip: str):
+    if not uuid or not ip or ip == "نامشخص":
+        return
+    now = time.time()
+    user_ips = _ip_activity.setdefault(uuid, {})
+    user_ips[ip] = now
+
+
+def get_active_ips_for_uuid(uuid: str) -> set:
+    now = time.time()
+    user_ips = _ip_activity.get(uuid, {})
+    active = {ip for ip, last_seen in user_ips.items() if now - last_seen < IP_TTL_SECONDS}
+    if len(user_ips) > len(active) + 10:
+        _ip_activity[uuid] = {ip: t for ip, t in user_ips.items() if ip in active}
+    return active
+
+
+def is_ip_within_limit(link: dict | None, uuid: str, ip: str) -> bool:
+    if not link:
+        return False
+    limit = int(link.get("ip_limit", 0) or 0)
+    if limit <= 0:
+        return True
+    active_ips = get_active_ips_for_uuid(uuid)
+    if ip in active_ips:
+        return True
+    return len(active_ips) < limit

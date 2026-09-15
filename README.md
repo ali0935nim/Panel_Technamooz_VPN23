@@ -1,80 +1,128 @@
-# Panel Technamooz v1.0.0 Stable
+# Panel Technamooz `v1.0.0.0` <span style="color:#10b981;font-weight:bold;font-size:0.7em;">STABLE</span>
 
-> پنل حرفه‌ای ساخت و مدیریت کانفیگ VLESS/XHTTP، ساخته‌شده توسط **تیم Technamooz** با مدیریت **amirparsa**.
+> پنل فوق‌حرفه‌ای و یکپارچه ساخت، توزیع و مدیریت کانفیگ‌های ابری VPN بر پایهٔ پایتون و FastAPI  
+> توسعه‌یافته توسط **تیم Technamooz** با مدیریت **amirparsa**  
+> نسخه: `technamooz-version-1.0.0.0 stable`
 
-## معرفی
+---
 
-Panel Technamooz یک پنل Python/FastAPI آمادهٔ استقرار روی Railway است. نسخهٔ 2.0.0 شامل بازسازی هویت بصری glassmorphism مشکی‌ـقرمز، داشبورد مدیریتی واکنش‌گرا، ورود username/password، تم دارک و لایت، تغییر زبان فارسی/انگلیسی با پیش‌فرض انگلیسی، مدیریت کامل کانفیگ‌ها و مرکز کنترل ربات Telegram است.
+## 🌟 معرفی پروژه (Overview)
+**Panel Technamooz** یک سیستم مدرن، پرسرعت و کم‌مصرف برای ساخت و کنترل ترافیک کانفیگ‌های امن ضد فیلترینگ است که به صورت ۱۰۰٪ به زبان **Python** و با فریم‌ورک قدرتمند **FastAPI** توسعه داده شده است. این نسخه برای استقرار پایدار و مقیاس‌پذیر بر روی سرورهای ابری و به‌ویژه پلتفرم **Railway** بهینه‌سازی شده است.
 
-## قابلیت‌ها
+---
 
-ساخت VLESS WebSocket و XHTTP، سهمیه و انقضا، محدودیت IP و سرعت، fingerprint و ALPN، QR و export، گروه‌های subscription، صفحات عمومی اشتراک، آمار ترافیک و اتصالات، لاگ فعالیت، backup/restore، تست WebSocket، تغییر رمز، کنترل نشست‌ها و ربات تلگرام با wizard ساخت کانفیگ و مدیریت گروه‌ها در این نسخه حفظ و یکپارچه شده‌اند.
+## 🚀 قابلیت‌های کلیدی نسخه Ultra 3.0 Stable
 
-## پیش‌نیازها
+### 🛡️ پروتکل‌های پشتیبانی‌شده
+- **VLESS WebSocket (WS)** با پشتیبانی از TLS / Reality
+- **Trojan WebSocket (WS)** با احراز هویت SHA-224 و بازپخش مستقیم به هسته
+- **XHTTP Packet-Up** (فناوری عبور از شدیدترین محدودیت‌ها)
+- **XHTTP Stream-Up** با مدیریت بهینه جریان داده و مالتی‌پلکسینگ
 
-Python 3.11 یا بالاتر، pip، یک سرویس Railway و برای نگهداری دائمی داده‌ها یک Volume در مسیر `/data` لازم است. مرورگر مدرن برای رابط کاربری پیشنهاد می‌شود.
+### 📡 فرمت‌های اشتراک نوین و هوشمند
+- **Clash Meta / Mihomo (YAML)**: خروجی کامل و استاندارد پروکسی با Ruleها و تنظیمات DNS
+- **Sing-box (JSON)**: سازگار با نسخه 1.8+ برای کلاینت‌های Android، iOS، Windows و Linux
+- **V2Ray / Xray URI**: لینک‌های استاندارد سازگار با v2rayNG, Streisand, FoXray, Nekobox, Shadowrocket
+- **صفحات سابسکریپشن وب**: پنل عمومی زیبا برای هر مشترک با QR Code و نمایش حجم/انقضا
 
-## نصب محلی صفر تا صد
+### 🎯 مسیریابی با آی‌پی تمیز (Clean IP / CDN Domain)
+- پشتیبانی مستقیم از درج Clean IP مخصوص اپراتورهای ایرانسل، همراه‌اول، رایتل و مخابرات
+- امکان تعیین دامنه CDN مجزا برای Host و SNI به منظور دور زدن مسدودسازی‌های SNI-based
+
+### 🎨 رابط کاربری گلاسمورفیسم نوین (Glassmorphism UI/UX)
+- **دو زبانه کامل**: انگلیسی (پیش‌فرض) و فارسی با سوئیچ آنی بدون رفرش
+- **دو تم رنگی اختصاصی**:
+  - **تم تاریک (Dark Mode)**: مشکی متالیک و قرمز آتشین (`#07070a` + `#ef233c`)
+  - **تم روشن (Light Mode)**: سفید ابریشمی، بنفش نئونی و قرمز (`#f8fafc` + `#7209b7` + `#ef233c`)
+- **لوگوی اختصاصی Technamooz**: تعبیه‌شده به‌صورت وکتور و پایدار در تمام صفحات
+- **ویترین شبکه‌های اجتماعی تکناموز**: دسترسی ۱-کلیک به یوتیوب، تلگرام، اینستاگرام، توییتر، گیت‌هاب، وبسایت رسمی و پشتیبانی
+
+### ⚙️ امنیت و کنترل ترافیک سازمانی
+- **محدودیت تعداد کاربر همزمان (IP Limiter)**: جلوگیری از اشتراک‌گذاری اکانت‌ها با TTL دقیق
+- **محدودکننده نرخ سرعت (Token Bucket Limiter)**: اعمال سقف پهنای باند بر حسب مگابیت (Mbps)
+- **تمدید ۱-کلیک (+۳۰ روز)** و **ریست ترافیک مصرفی**
+- **ورود دو مرحله‌ای با کد امنیتی (CAPTCHA)** جهت محافظت در برابر حملات Brute-Force
+- **امکان تغییر نام کاربری و رمز عبور** از درون پنل و اعمال لحظه‌ای در هش امنیتی PBKDF2
+
+### 🤖 ربات تلگرام پیشرفته Technamooz
+- نظارت لحظه‌ای بر سلامت سرور، مصرف پردازنده، رم و ترافیک (`/status`)
+- ساخت و صدور سریع کانفیگ‌های VLESS و Trojan
+- ارسال لینک‌های مستقیم اشتراک Clash و Sing-box به کاربران
+- دستورات تمدید و ریست اکانت برای ادمین
+
+---
+
+## 🔑 مشخصات پیش‌فرض ورود (Default Credentials)
+
+- **نام کاربری**: `Amirparsa`
+- **رمز عبور توسعه محلی**: `Technamooz` (در production حتماً مقدار امن تنظیم کنید)
+- **کد امنیتی (کپچا)**: کد تصادفی ۵ رقمی نمایش داده‌شده در صفحه
+
+*(پس از اولین ورود می‌توانید از منوی تنظیمات یا آیکون پروفایل، نام کاربری و رمز عبور را به دلخواه خود تغییر دهید)*
+
+---
+
+## ☁️ راهنمای استقرار روی Railway (Deployment Guide)
+
+این پروژه دارای فایل‌های استاندارد `railway.json` و `Procfile` است و برای اجرای مستقیم روی Railway طراحی شده است.
+
+### مراحل نصب:
+1. مخزن گیت‌هاب پروژه را در حساب Railway خود **Import** کنید:
+   ```
+   https://github.com/technamooz/Panel_Technamooz_VPN
+   ```
+2. در تنظیمات سرویس Railway، یک **Volume** ایجاد کرده و مسیر Mount آن را برابر با `/data` قرار دهید (جهت ذخیره دائمی دیتابیس کانفیگ‌ها و ساب‌ها).
+3. متغیرهای محیطی اختیاری (Environment Variables):
+   - `ADMIN_USERNAME`: نام کاربری ادمین (پیش‌فرض: `Amirparsa`)
+   - `ADMIN_PASSWORD`: رمز عبور ادمین (در محیط production الزامی و بدون مقدار پیش‌فرض امن)
+   - `DATA_DIR`: مسیر ذخیره داده‌ها (پیش‌فرض: `/data` در Railway و `./data` در محیط محلی)
+   - `TELEGRAM_BOT_TOKEN`: توکن ربات تلگرام (اختیاری)
+   - `TELEGRAM_ADMIN_IDS`: شناسه‌های عددی تلگرام ادمین‌ها با کاما (اختیاری)
+4. پلتفرم Railway به صورت خودکار متغیر `PORT` را تزریق کرده و سرویس از طریق دستور زیر راه‌اندازی می‌شود:
+   ```bash
+   uvicorn main:app --host 0.0.0.0 --port $PORT
+   ```
+5. هلث‌چک پروژه روی آدرس `/health` به صورت فعال نظارت می‌کند.
+
+---
+
+## 💻 راه‌اندازی محلی (Local Development)
 
 ```bash
-git clone <YOUR_REPOSITORY_URL>
-cd technamooz-panel
-python3 -m venv .venv
-source .venv/bin/activate
+# کلون پروژه
+git clone https://github.com/technamooz/Panel_Technamooz_VPN.git
+cd Panel_Technamooz_VPN
+
+# ساخت و فعال‌سازی محیط مجازی
+python3 -m venv venv
+source venv/bin/activate  # در ویندوز: venv\Scripts\activate
+
+# نصب پیش‌نیازها
 pip install -r requirements.txt
-export ADMIN_USERNAME='Amirparsa'
-export ADMIN_PASSWORD='یک-رمز-قوی-حداقل-۱۰-کاراکتری'
-export SECRET_KEY='یک-کلید-تصادفی-طولانی'
-export DATA_DIR='./data'
-uvicorn main:app --host 0.0.0.0 --port 8000
+
+# اجرای سرور
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-آدرس ورود `http://localhost:8000/login` است. **نام کاربری پیش‌فرض `Amirparsa` است** و رمز پیش‌فرض در صورتی که `ADMIN_PASSWORD` تنظیم نشود `Technamooz@ChangeMe` خواهد بود؛ این رمز فقط برای اجرای آزمایشی است و باید بلافاصله تغییر کند.
+سپس مرورگر خود را باز کرده و به آدرس زیر مراجعه نمایید:
+```
+http://localhost:8000/login
+```
 
-## استقرار Railway
+---
 
-یک پروژهٔ جدید بسازید، Repository را متصل کنید و یک Volume با mount path برابر `/data` اضافه کنید. سپس Variables زیر را تعریف کنید. Railway مقدار `PORT` را خودکار تنظیم می‌کند و `Procfile` با `0.0.0.0` اجرا می‌شود. فایل `railway.json` نیز healthcheck مسیر `/health` را فراهم می‌کند.
+## 🌐 شبکه‌های اجتماعی و جامعه کاربری Technamooz
 
-| Variable | مقدار | ضرورت |
-|---|---|---|
-| `ADMIN_USERNAME` | `Amirparsa` یا نام دلخواه | الزامی برای ورود |
-| `ADMIN_PASSWORD` | رمز قوی | الزامی در production |
-| `SECRET_KEY` | رشته تصادفی طولانی | الزامی برای ثبات نشست |
-| `DATA_DIR` | `/data` | الزامی برای Volume |
-| `RAILWAY_PUBLIC_DOMAIN` | دامنه عمومی | برای لینک‌های کانفیگ |
-| `TELEGRAM_BOT_TOKEN` | توکن BotFather | فعال‌سازی اولیه ربات، اختیاری |
-| `TELEGRAM_ADMIN_IDS` | شناسه‌های عددی با کاما | ادمین‌های مجاز ربات |
+- 📺 **YouTube**: [@technamooz](https://youtube.com/@technamooz)
+- 📢 **Telegram Channel**: [@technamooz](https://t.me/technamooz)
+- 📸 **Instagram**: [@technamooz](https://instagram.com/technamooz)
+- 🐦 **Twitter / X**: [@technamooz](https://twitter.com/technamooz)
+- 🐙 **GitHub**: [github.com/technamooz](https://github.com/technamooz)
+- 🌍 **Official Website**: [technamooz.ir](https://technamooz.ir)
+- 💬 **Telegram Support**: [@technamooz_support](https://t.me/technamooz_support)
 
-پس از Deploy، `/health` را باز کنید، وارد پنل شوید و از منوی **Telegram Bot** تنظیمات ربات را بررسی یا از داخل پنل اعمال کنید. برای جلوگیری از افشای توکن، آن را در Variableهای Railway نگهداری کنید. اگر تنظیمات از داخل پنل ذخیره شود، در state پروژه ذخیره و در startup بعدی بازیابی می‌شود؛ Volume نباید حذف شود.
+---
 
-## ربات Telegram
-
-برای راه‌اندازی، در BotFather یک bot بسازید، مقدار `TELEGRAM_BOT_TOKEN` را تنظیم کنید و شناسه عددی مدیر را در `TELEGRAM_ADMIN_IDS` قرار دهید. پس از ورود به پنل، در بخش Telegram Bot می‌توانید وضعیت، Admin IDها و فعال‌سازی runtime را مدیریت کنید. ربات از long polling استفاده می‌کند و به webhook یا دامنهٔ جداگانه نیاز ندارد. قابلیت‌های آن شامل wizard ساخت کانفیگ، فهرست و جزئیات، فعال/غیرفعال‌سازی، مدیریت گروه‌های ساب و افزودن/حذف کانفیگ از گروه است.
-
-## امنیت و داده
-
-رمز با PBKDF2-SHA256 و salt تصادفی ذخیره می‌شود، ورود rate limit دارد و APIهای مدیریتی session لازم دارند. مقدارهای محرمانه را commit نکنید، `SECRET_KEY` را تغییر ندهید مگر اینکه قصد invalidate شدن نشست‌ها را دارید، و به‌صورت دوره‌ای از بخش تنظیمات backup بگیرید.
-
-## ساختار فایل‌ها
-
-| فایل | کاربرد |
-|---|---|
-| `main.py` | FastAPI، persistence، احراز هویت، API و کنترل ربات |
-| `pages.py` | Login، dashboard و رابط کاربری دو‌زبانه |
-| `telegram_bot.py` | ربات Telegram و فرمان‌های مدیریت |
-| `relay_vless.py` | تونل VLESS روی WebSocket |
-| `xhttp_siz10.py` | ترابرد XHTTP |
-| `speed_limit.py` | کنترل سرعت |
-| `Procfile` | اجرای Railway |
-| `railway.json` | healthcheck و restart policy |
-
-## پشتیبانی رسمی
-
-تلگرام رسمی: [@technamooz](https://t.me/technamooz) · پشتیبانی مستقیم: [@technamooz_support](https://t.me/technamooz_support) · ایمیل: [Technamooz@gmail.com](mailto:Technamooz@gmail.com) · وب‌سایت: [Technamooz.ir](https://technamooz.ir) · Instagram/YouTube/X/GitHub: `@technamooz` و `amirparsa`.
-
-© 2026 Technamooz Team · Managed by amirparsa
-
-
-### تغییر مشخصات ورود
-
-پس از ورود، از بخش تنظیمات امنیتی می‌توانید نام کاربری و رمز را تغییر دهید. رمز جدید باید حداقل ۱۰ کاراکتر داشته باشد. برای اجرای اولیه، مقادیر پیش‌فرض دقیقاً `Amirparsa` و `Technamooz` هستند؛ در محیط عمومی حتماً آن‌ها را تغییر دهید.
+## 📄 لایسنس و حقوق نشر
+این پروژه تحت لایسنس MIT منتشر شده است.  
+توسعه‌یافته با افتخار توسط **تیم Technamooz** با مدیریت **amirparsa**.

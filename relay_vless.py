@@ -1,20 +1,22 @@
 # relay_vless.py
-# بخش VLESS Relay — جدا شده از main.py (منطق اصلی دست‌نخورده)
-# تغییر: ثبت IP واقعی کلاینت (با احتساب هدر x-forwarded-for پشت پراکسی) در connections
+# ══════════════════════════════════════════════════════════════════════════════
+# Panel Technamooz v1.0.0.0 stable
+# ماژول رله VLESS و Trojan با پشتیبانی از WebSocket، TCP Keep-Alive و کنترل کیفیت اتصال
+# توسعه‌یافته توسط تیم Technamooz با مدیریت amirparsa
+# ══════════════════════════════════════════════════════════════════════════════
 
 import asyncio
+import hashlib
 import secrets
+import socket
 from datetime import datetime
-
 from fastapi import WebSocket, WebSocketDisconnect
-
 from main import (
     LINKS,
     LINKS_LOCK,
     connections,
     error_logs,
     hourly_traffic,
-    is_ip_allowed,
     is_link_allowed,
     log_activity,
     logger,
@@ -22,15 +24,15 @@ from main import (
     save_state,
     stats,
 )
-from speed_limit import throttle
+from speed_limit import is_ip_within_limit, record_ip_active, throttle
 
-# ══════════════════════════════════════════════════════════════════════════════
-# VLESS Relay — بهینه‌شده برای حداکثر throughput
-# ══════════════════════════════════════════════════════════════════════════════
+RELAY_BUF = 256 * 1024  # 256 KB high-throughput buffer
 
-RELAY_BUF = 256 * 1024   # 256 KB buffer
 
 def _ws_client_ip(ws: WebSocket) -> str:
+    cf_ip = ws.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
     fwd = ws.headers.get("x-forwarded-for")
     if fwd:
         return fwd.split(",")[0].strip()
@@ -39,26 +41,90 @@ def _ws_client_ip(ws: WebSocket) -> str:
         return real_ip.strip()
     return ws.client.host if ws.client else "نامشخص"
 
+
 async def parse_vless_header(chunk: bytes):
+    """
+    آنپک کردن هدر استاندارد VLESS
+    """
     if len(chunk) < 24:
-        raise ValueError("chunk too small")
+        raise ValueError("chunk too small for VLESS")
     pos = 1
-    pos += 16
-    addon_len = chunk[pos]; pos += 1 + addon_len
-    command = chunk[pos]; pos += 1
-    port = int.from_bytes(chunk[pos:pos+2], "big"); pos += 2
-    addr_type = chunk[pos]; pos += 1
-    if addr_type == 1:
-        address = ".".join(str(b) for b in chunk[pos:pos+4]); pos += 4
-    elif addr_type == 2:
-        dlen = chunk[pos]; pos += 1
-        address = chunk[pos:pos+dlen].decode("utf-8", errors="ignore"); pos += dlen
-    elif addr_type == 3:
-        ab = chunk[pos:pos+16]; pos += 16
-        address = ":".join(f"{ab[i]:02x}{ab[i+1]:02x}" for i in range(0, 16, 2))
+    pos += 16  # UUID
+    addon_len = chunk[pos]
+    pos += 1 + addon_len
+    command = chunk[pos]
+    pos += 1
+    port = int.from_bytes(chunk[pos:pos + 2], "big")
+    pos += 2
+    addr_type = chunk[pos]
+    pos += 1
+
+    if addr_type == 1:  # IPv4
+        address = ".".join(str(b) for b in chunk[pos:pos + 4])
+        pos += 4
+    elif addr_type == 2:  # Domain
+        dlen = chunk[pos]
+        pos += 1
+        address = chunk[pos:pos + dlen].decode("utf-8", errors="ignore")
+        pos += dlen
+    elif addr_type == 3:  # IPv6
+        ab = chunk[pos:pos + 16]
+        pos += 16
+        address = ":".join(f"{ab[i]:02x}{ab[i + 1]:02x}" for i in range(0, 16, 2))
     else:
         raise ValueError(f"unknown addr type: {addr_type}")
+
     return command, address, port, chunk[pos:]
+
+
+async def parse_trojan_header(chunk: bytes, expected_uuid: str):
+    """
+    آنپک کردن هدر استاندارد پروتکل Trojan
+    Trojan: 56 hex chars (sha224) + \r\n + command (1:TCP, 3:UDP) + addr_type + addr + port + \r\n + payload
+    """
+    if len(chunk) < 62:
+        raise ValueError("chunk too small for Trojan")
+
+    expected_hash = hashlib.sha224(expected_uuid.encode()).hexdigest().lower()
+    recv_hash = chunk[:56].decode("ascii", errors="ignore").lower()
+
+    if recv_hash != expected_hash:
+        # Also allow matching raw UUID if formatted that way
+        if chunk[:36].decode("ascii", errors="ignore").lower() != expected_uuid.lower():
+            raise ValueError("Trojan authentication hash mismatch")
+
+    pos = 56
+    if chunk[pos:pos + 2] == b"\r\n":
+        pos += 2
+
+    command = chunk[pos]
+    pos += 1
+    addr_type = chunk[pos]
+    pos += 1
+
+    if addr_type == 1:  # IPv4
+        address = ".".join(str(b) for b in chunk[pos:pos + 4])
+        pos += 4
+    elif addr_type == 2:  # Domain
+        dlen = chunk[pos]
+        pos += 1
+        address = chunk[pos:pos + dlen].decode("utf-8", errors="ignore")
+        pos += dlen
+    elif addr_type == 3:  # IPv6
+        ab = chunk[pos:pos + 16]
+        pos += 16
+        address = ":".join(f"{ab[i]:02x}{ab[i + 1]:02x}" for i in range(0, 16, 2))
+    else:
+        raise ValueError(f"unknown Trojan addr type: {addr_type}")
+
+    port = int.from_bytes(chunk[pos:pos + 2], "big")
+    pos += 2
+
+    if chunk[pos:pos + 2] == b"\r\n":
+        pos += 2
+
+    return command, address, port, chunk[pos:]
+
 
 async def check_and_use(uid: str, n: int) -> bool:
     async with LINKS_LOCK:
@@ -72,6 +138,7 @@ async def check_and_use(uid: str, n: int) -> bool:
         hourly_traffic[now_ir().strftime("%H:00")] += n
     return True
 
+
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
     try:
         while True:
@@ -84,9 +151,10 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
-            await throttle(uid, len(data))
+            await throttle(uid, len(data), LINKS)
             stats["total_requests"] += 1
-            connections[conn_id]["bytes"] += len(data)
+            if conn_id in connections:
+                connections[conn_id]["bytes"] += len(data)
             writer.write(data)
             if writer.transport.get_write_buffer_size() > RELAY_BUF:
                 await writer.drain()
@@ -98,7 +166,8 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
         except Exception:
             pass
 
-async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
+
+async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str, is_trojan: bool = False):
     first = True
     try:
         while True:
@@ -108,45 +177,72 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
-            await throttle(uid, len(data))
-            connections[conn_id]["bytes"] += len(data)
-            payload = (b"\x00\x00" + data) if first else data
-            first = False
+            await throttle(uid, len(data), LINKS)
+            if conn_id in connections:
+                connections[conn_id]["bytes"] += len(data)
+
+            if first:
+                first = False
+                payload = data if is_trojan else (b"\x00\x00" + data)
+            else:
+                payload = data
             await ws.send_bytes(payload)
     except Exception:
         pass
 
-async def websocket_tunnel(ws: WebSocket, uuid: str):
-    await ws.accept()
 
+def _tune_socket_tcp(writer: asyncio.StreamWriter):
+    sock = writer.transport.get_extra_info("socket")
+    if sock:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Linux TCP keepalive settings
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except Exception:
+            pass
+
+
+async def websocket_tunnel(ws: WebSocket, uuid: str):
+    """
+    هندلر اصلی اتصال WebSocket برای VLESS و Trojan
+    """
+    await ws.accept()
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
 
     if not is_link_allowed(link):
-        logger.warning(f"🚫 WS rejected uuid={uuid[:8]}… (not allowed)")
+        logger.warning(f"🚫 [Technamooz] WS rejected uuid={uuid[:8]}… (inactive/expired)")
         await ws.close(code=1008, reason="not authorized")
         return
 
     ip = _ws_client_ip(ws)
 
-    if not is_ip_allowed(link, uuid, ip):
-        logger.warning(f"🚫 WS rejected uuid={uuid[:8]}… ip={ip} (ip limit reached)")
-        log_activity("connection", f"اتصال {ip} به کانفیگ «{link.get('label','?')}» رد شد (محدودیت تعداد آی‌پی)", "warn")
+    if not is_ip_within_limit(link, uuid, ip):
+        logger.warning(f"🚫 [Technamooz] WS rejected uuid={uuid[:8]}… ip={ip} (ip limit exceeded)")
+        log_activity("connection", f"اتصال {ip} به کانفیگ «{link.get('label', '?')}» رد شد (سقف مجاز آی‌پی)", "warn")
         await ws.close(code=1008, reason="ip limit reached")
         return
 
+    record_ip_active(uuid, ip)
+    is_trojan_link = (link.get("protocol") == "trojan-ws")
     conn_id = secrets.token_urlsafe(6)
     connections[conn_id] = {
         "uuid": uuid,
         "ip": ip,
-        "transport": "vless-ws",
+        "transport": "trojan-ws" if is_trojan_link else "vless-ws",
         "connected_at": datetime.now().isoformat(),
         "bytes": 0,
     }
-    logger.info(f"✅ WS [{conn_id}] uuid={uuid[:8]}… ip={ip} total={len(connections)}")
-    log_activity("connection", f"اتصال جدید از {ip} (کانفیگ {link.get('label','?')})", "info")
-    writer = None
+    logger.info(f"✅ [Technamooz] WS [{conn_id}] uuid={uuid[:8]}… ip={ip} total={len(connections)}")
+    log_activity("connection", f"اتصال جدید از {ip} (کانفیگ {link.get('label', '?')})", "info")
 
+    writer = None
     try:
         first_msg = await asyncio.wait_for(ws.receive(), timeout=15.0)
         if first_msg["type"] == "websocket.disconnect":
@@ -155,24 +251,36 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         if not first_chunk:
             return
 
-        command, address, port, payload = await parse_vless_header(first_chunk)
+        is_trojan = is_trojan_link
+        # Try unpacking as Trojan if link is Trojan, else VLESS
+        if is_trojan:
+            try:
+                command, address, port, payload = await parse_trojan_header(first_chunk, uuid)
+            except Exception:
+                # Fallback to VLESS unpack
+                command, address, port, payload = await parse_vless_header(first_chunk)
+                is_trojan = False
+        else:
+            try:
+                command, address, port, payload = await parse_vless_header(first_chunk)
+            except Exception:
+                command, address, port, payload = await parse_trojan_header(first_chunk, uuid)
+                is_trojan = True
 
         if not await check_and_use(uuid, len(first_chunk)):
             await ws.close(code=1008, reason="quota/disabled")
             return
+        await throttle(uuid, len(first_chunk), LINKS)
 
         stats["total_requests"] += 1
         connections[conn_id]["bytes"] += len(first_chunk)
-        logger.info(f"➡️  [{conn_id}] → {address}:{port}")
+        logger.info(f"➡️ [Technamooz] [{conn_id}] → {address}:{port} ({'Trojan' if is_trojan else 'VLESS'})")
 
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(address, port),
-            timeout=10.0
+            timeout=10.0,
         )
-        sock = writer.transport.get_extra_info('socket')
-        if sock:
-            import socket
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _tune_socket_tcp(writer)
 
         if payload:
             writer.write(payload)
@@ -181,7 +289,7 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         done, pending = await asyncio.wait(
             {
                 asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid)),
-                asyncio.create_task(relay_tcp_to_ws(ws, reader, conn_id, uuid)),
+                asyncio.create_task(relay_tcp_to_ws(ws, reader, conn_id, uuid, is_trojan=is_trojan)),
             },
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -193,7 +301,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
                 pass
 
         asyncio.create_task(save_state())
-
     except WebSocketDisconnect:
         pass
     except asyncio.TimeoutError:
@@ -211,4 +318,4 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             except Exception:
                 pass
         connections.pop(conn_id, None)
-        logger.info(f"🔌 WS closed [{conn_id}] total={len(connections)}")
+        logger.info(f"🔌 [Technamooz] WS closed [{conn_id}] total={len(connections)}")

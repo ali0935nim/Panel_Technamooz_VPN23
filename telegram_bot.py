@@ -5,6 +5,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 import asyncio
+import html
 import os
 import re
 from datetime import datetime, timedelta
@@ -18,10 +19,12 @@ from main import (
     DEFAULT_PROTOCOL,
     FINGERPRINTS,
     LINKS,
+    LINKS_LOCK,
     MAX_PORT,
     MIN_PORT,
     PROTOCOLS,
     SUBS,
+    SUBS_LOCK,
     create_sub_group,
     fmt_bytes,
     get_host,
@@ -32,6 +35,8 @@ from main import (
     parse_speed_to_bytes,
     remove_link,
     remove_sub_group,
+    renew_link_helper,
+    reset_link_usage_helper,
     set_link_active,
     set_link_sub,
     vless_link_for_link,
@@ -44,6 +49,10 @@ ADMIN_IDS = {int(x) for x in _admin_ids_raw.replace(" ", "").split(",") if x.isd
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PAGE_SIZE = 6
 
+def _h(value) -> str:
+    """Escape user-controlled text for Telegram HTML parse mode."""
+    return html.escape(str(value if value is not None else ""), quote=False)
+
 _client: httpx.AsyncClient | None = None
 _poll_task: asyncio.Task | None = None
 _running = False
@@ -55,10 +64,11 @@ _pending: dict = {}   # chat_id -> {"action": "wizard", "step": "...", "data": {
 WIZARD_STEPS = ["label", "protocol", "fingerprint", "alpn", "port", "volume", "speed", "iplimit", "days"]
 
 PROTOCOL_LABELS = {
-    "vless-ws": "VLESS + WebSocket",
-    "xhttp-packet-up": "XHTTP (packet-up)",
-    "xhttp-stream-up": "XHTTP (stream-up)",
-    }
+    "vless-ws": "🌐 VLESS + WebSocket (پیشنهادی ⭐)",
+    "trojan-ws": "🛡️ Trojan + WebSocket (ضد فیلتر)",
+    "xhttp-packet-up": "⚡ XHTTP Packet-Up (نسل جدید)",
+    "xhttp-stream-up": "🌊 XHTTP Stream-Up (توربو)",
+}
 
 def _protocol_label(p: str) -> str:
     return PROTOCOL_LABELS.get(p, p)
@@ -143,10 +153,10 @@ def _is_admin(chat_id: int) -> bool:
 # ── Keyboards ────────────────────────────────────────────────────────────────
 def _main_menu_kb():
     return {"inline_keyboard": [
-        [{"text": "📋 لیست کانفیگ‌ها", "callback_data": "list:0"}],
-        [{"text": "➕ ساخت کانفیگ جدید", "callback_data": "newcfg"}],
+        [{"text": "📋 لیست کانفیگ‌ها", "callback_data": "list:0"}, {"text": "➕ ساخت کانفیگ جدید", "callback_data": "newcfg"}],
         [{"text": "🗂 گروه‌های ساب (لینک حرفه‌ای)", "callback_data": "subs:0"}],
-        [{"text": "🔄 رفرش", "callback_data": "menu"}],
+        [{"text": "📊 وضعیت سرور و سیستم", "callback_data": "sysstatus"}],
+        [{"text": "🔄 رفرش پنل", "callback_data": "menu"}],
     ]}
 
 def _links_list_kb(page: int):
@@ -172,6 +182,8 @@ def _links_list_kb(page: int):
 def _link_detail_kb(uid: str, active: bool):
     return {"inline_keyboard": [
         [{"text": "🔗 نمایش لینک اتصال", "callback_data": f"link:{uid}"}],
+        [{"text": "⚡ لینک Clash و Sing-box", "callback_data": f"clashsingbox:{uid}"}],
+        [{"text": "🔄 ریست مصرف", "callback_data": f"resetusage:{uid}"}, {"text": "⏳ تمدید ۳۰ روزه", "callback_data": f"renewlink:{uid}"}],
         [{"text": "🗂 گروه ساب (لینک حرفه‌ای)", "callback_data": f"cfggroup:{uid}"}],
         [{"text": ("⛔ غیرفعال‌سازی" if active else "✅ فعال‌سازی"), "callback_data": f"toggle:{uid}"}],
         [{"text": "🗑 حذف کانفیگ", "callback_data": f"del:{uid}"}],
@@ -188,21 +200,31 @@ def _confirm_delete_kb(uid: str):
 def _wizard_cancel_kb():
     return {"inline_keyboard": [[{"text": "❌ انصراف", "callback_data": "w:cancel"}]]}
 
+def _wizard_label_kb():
+    return {"inline_keyboard": [
+        [{"text": "⏭ نام خودکار (پیش‌فرض)", "callback_data": "w:skip:label"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
+
 def _wizard_protocol_kb():
-    rows = [[{"text": _protocol_label(p), "callback_data": f"w:proto:{p}"}] for p in PROTOCOLS]
-    rows.append([{"text": "❌ انصراف", "callback_data": "w:cancel"}])
-    return {"inline_keyboard": rows}
+    return {"inline_keyboard": [
+        [{"text": "⭐ VLESS-WS (پیشنهادی / سازگار با همه)", "callback_data": "w:proto:vless-ws"}],
+        [{"text": "🛡️ Trojan-WS (مقاوم در برابر فیلترینگ)", "callback_data": "w:proto:trojan-ws"}],
+        [{"text": "⚡ XHTTP Packet-Up (پروتکل نوین)", "callback_data": "w:proto:xhttp-packet-up"}],
+        [{"text": "🌊 XHTTP Stream-Up (استریم سریع)", "callback_data": "w:proto:xhttp-stream-up"}],
+        [{"text": "⏭ انتخاب پیش‌فرض (VLESS-WS)", "callback_data": "w:proto:vless-ws"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
 
 def _wizard_fp_kb():
-    rows, row = [], []
-    for fp in FINGERPRINTS:
-        row.append({"text": _fp_label(fp), "callback_data": f"w:fp:{fp}"})
-        if len(row) == 3:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    rows.append([{"text": "❌ انصراف", "callback_data": "w:cancel"}])
-    return {"inline_keyboard": rows}
+    return {"inline_keyboard": [
+        [{"text": "⭐ chrome (پیشنهادی / پیش‌فرض)", "callback_data": "w:fp:chrome"}],
+        [{"text": "📱 ios", "callback_data": "w:fp:ios"}, {"text": "🤖 android", "callback_data": "w:fp:android"}],
+        [{"text": "🦊 firefox", "callback_data": "w:fp:firefox"}, {"text": "🧭 safari", "callback_data": "w:fp:safari"}],
+        [{"text": "🎲 تصادفی (randomized)", "callback_data": "w:fp:randomized"}],
+        [{"text": "⏭ انتخاب پیش‌فرض (chrome)", "callback_data": "w:fp:chrome"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
 
 def _wizard_skip_kb(step_key: str, label: str):
     return {"inline_keyboard": [
@@ -214,10 +236,39 @@ ALPN_PRESET_MAP = {"p1": "http/1.1", "p2": "h2,http/1.1", "p3": "h2"}
 
 def _wizard_alpn_kb():
     return {"inline_keyboard": [
-        [{"text": "🔤 http/1.1 (پیشنهادی)", "callback_data": "w:alpnpreset:p1"}],
+        [{"text": "⭐ http/1.1 (پیشنهادی)", "callback_data": "w:alpnpreset:p1"}],
         [{"text": "🔤 h2,http/1.1", "callback_data": "w:alpnpreset:p2"}],
         [{"text": "🔤 h2", "callback_data": "w:alpnpreset:p3"}],
         [{"text": "⏭ پیش‌فرض پروتکل", "callback_data": "w:skip:alpn"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
+
+def _wizard_volume_kb():
+    return {"inline_keyboard": [
+        [{"text": "📦 ۱۰ گیگابایت", "callback_data": "w:volpreset:10GB"}, {"text": "📦 ۲۰ گیگابایت", "callback_data": "w:volpreset:20GB"}, {"text": "📦 ۳۰ گیگابایت", "callback_data": "w:volpreset:30GB"}],
+        [{"text": "📦 ۵۰ گیگابایت", "callback_data": "w:volpreset:50GB"}, {"text": "📦 ۱۰۰ گیگابایت", "callback_data": "w:volpreset:100GB"}],
+        [{"text": "♾ بدون سقف مصرف (نامحدود)", "callback_data": "w:skip:volume"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
+
+def _wizard_speed_kb():
+    return {"inline_keyboard": [
+        [{"text": "🚀 ۱۰ Mbps", "callback_data": "w:speedpreset:10"}, {"text": "🚀 ۲۰ Mbps", "callback_data": "w:speedpreset:20"}, {"text": "🚀 ۵۰ Mbps", "callback_data": "w:speedpreset:50"}],
+        [{"text": "♾ بدون سقف سرعت (حداکثر)", "callback_data": "w:skip:speed"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
+
+def _wizard_iplimit_kb():
+    return {"inline_keyboard": [
+        [{"text": "👥 ۱ کاربر (تک‌کاربره)", "callback_data": "w:ippreset:1"}, {"text": "👥 ۲ کاربر", "callback_data": "w:ippreset:2"}, {"text": "👥 ۳ کاربر", "callback_data": "w:ippreset:3"}],
+        [{"text": "♾ بدون سقف کاربر (نامحدود)", "callback_data": "w:skip:iplimit"}],
+        [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
+    ]}
+
+def _wizard_days_kb():
+    return {"inline_keyboard": [
+        [{"text": "📅 ۳۰ روز (۱ ماه)", "callback_data": "w:dayspreset:30"}, {"text": "📅 ۶۰ روز (۲ ماه)", "callback_data": "w:dayspreset:60"}, {"text": "📅 ۹۰ روز (۳ ماه)", "callback_data": "w:dayspreset:90"}],
+        [{"text": "♾ بدون انقضا (نامحدود)", "callback_data": "w:skip:days"}],
         [{"text": "❌ انصراف", "callback_data": "w:cancel"}],
     ]}
 
@@ -234,68 +285,92 @@ def _wizard_prompt(step: str, data: dict) -> str:
     n = WIZARD_STEPS.index(step) + 1 if step in WIZARD_STEPS else len(WIZARD_STEPS)
     head = f"🧩 ساخت کانفیگ جدید — مرحله {n}/{len(WIZARD_STEPS)}\n\n"
     if step == "label":
-        return head + "✏️ اسم/برچسب کانفیگ رو بفرست:"
+        return head + "✏️ لطفاً یک اسم برای کانفیگ بفرستید (یا دکمه‌ی نام خودکار را بزنید):"
     if step == "protocol":
-        return head + "🌐 پروتکل رو از دکمه‌های زیر انتخاب کن:"
+        return head + (
+            "🌐 لطفاً پروتکل اتصال را انتخاب کنید:\n\n"
+            "💡 <b>پیشنهاد ویژه:</b> پروتکل <code>VLESS-WS</code> برای تمام اپراتورهای ایران و کلاینت‌ها (v2rayNG, Hiddify, V2Box) بیشترین سازگاری و پایداری را دارد."
+        )
     if step == "fingerprint":
-        return head + "🖐 Fingerprint (uTLS) رو انتخاب کن:"
+        return head + "🖐 فینگرپرینت امنیتی (uTLS Fingerprint) را انتخاب کنید:\n💡 <b>پیشنهادی:</b> <code>chrome</code>"
     if step == "alpn":
-        return head + ("🔤 ALPN رو از دکمه‌های زیر انتخاب کن (پیشنهادی: <code>http/1.1</code>)\n"
-                        "یا خودت هر مقدار دلخواهی رو تایپ و ارسال کن (مثلاً h2,http/1.1):")
+        return head + ("🔤 ALPN را از دکمه‌های زیر انتخاب کنید (پیشنهادی: <code>http/1.1</code>)\n"
+                        "یا مقدار دلخواه را تایپ و ارسال کنید:")
     if step == "port":
-        return head + f"🔌 شماره پورت (بین {MIN_PORT} تا {MAX_PORT}) رو بفرست\nیا پیش‌فرض ({DEFAULT_PORT}) رو انتخاب کن:"
+        return head + f"🔌 شماره پورت (بین {MIN_PORT} تا {MAX_PORT}) را بفرستید\nیا پیش‌فرض ({DEFAULT_PORT}) را انتخاب کنید:"
     if step == "volume":
-        return head + "📦 محدودیت حجم مصرفی رو بفرست، مثلاً:\n<code>10GB</code> یا <code>500MB</code>\nیا دکمه‌ی نامحدود رو بزن:"
+        return head + "📦 سقف حجم مصرفی را انتخاب کنید یا بنویسید (مثلاً <code>10GB</code> یا <code>500MB</code>):\nیا دکمه‌ی نامحدود را بزنید:"
     if step == "speed":
-        return head + "🚀 محدودیت سرعت رو به مگابیت‌بر‌ثانیه بفرست، مثلاً <code>20</code>\nیا دکمه‌ی نامحدود رو بزن:"
+        return head + "🚀 سقف سرعت را به مگابیت‌بر‌ثانیه بفرستید، مثلاً <code>20</code>\nیا دکمه‌ی نامحدود را بزنید:"
     if step == "iplimit":
-        return head + "👥 حداکثر تعداد آی‌پی/کاربر هم‌زمان مجاز رو بفرست\nیا دکمه‌ی نامحدود رو بزن:"
+        return head + "👥 حداکثر تعداد کاربر یا آی‌پی هم‌زمان مجاز را بفرستید\nیا دکمه‌ی نامحدود را بزنید:"
     if step == "days":
-        return head + "📅 تعداد روزهای اعتبار کانفیگ رو بفرست\nیا دکمه‌ی نامحدود (بدون انقضا) رو بزن:"
+        return head + "📅 تعداد روزهای اعتبار کانفیگ را انتخاب کنید یا بنویسید\nیا دکمه‌ی نامحدود (بدون انقضا) را بزنید:"
     return head
 
 def _wizard_summary(data: dict) -> str:
     limit = "نامحدود" if not data.get("limit_bytes") else fmt_bytes(data["limit_bytes"])
     speed = "نامحدود" if not data.get("speed_limit_bytes") else f"{data['speed_limit_bytes']*8/1024/1024:.1f} Mbps"
-    iplim = data.get("ip_limit", 0) or "نامحدود"
+    iplim = f"{data.get('ip_limit')} کاربر" if data.get("ip_limit") else "نامحدود"
     days = data.get("expires_days", 0)
-    days_txt = "بدون انقضا" if not days else f"{days} روز"
+    days_txt = "بدون انقضا (دائمی)" if not days else f"{days} روز"
     proto = data.get("protocol", DEFAULT_PROTOCOL)
     alpn = data.get("alpn") or f"پیش‌فرض ({DEFAULT_ALPN_BY_PROTOCOL.get(proto, 'http/1.1')})"
     return (
-        "🧩 خلاصه‌ی کانفیگ جدید — تایید کن:\n\n"
-        f"برچسب: <b>{data.get('label','?')}</b>\n"
-        f"پروتکل: {_protocol_label(proto)}\n"
-        f"Fingerprint: {_fp_label(data.get('fingerprint', DEFAULT_FINGERPRINT))}\n"
-        f"ALPN: {alpn}\n"
-        f"پورت: {data.get('port', DEFAULT_PORT)}\n"
-        f"محدودیت حجم: {limit}\n"
-        f"محدودیت سرعت: {speed}\n"
-        f"محدودیت آی‌پی: {iplim}\n"
-        f"انقضا: {days_txt}"
+        "🧩 <b>خلاصه‌ی مشخصات کانفیگ جدید — تایید نهایی:</b>\n\n"
+        f"🏷 <b>نام کانفیگ:</b> <code>{_h(data.get('label','?'))}</code>\n"
+        f"🌐 <b>پروتکل:</b> {_protocol_label(proto)}\n"
+        f"🖐 <b>فینگرپرینت:</b> <code>{_fp_label(data.get('fingerprint', DEFAULT_FINGERPRINT))}</code>\n"
+        f"🔤 <b>ALPN:</b> <code>{alpn}</code>\n"
+        f"🔌 <b>پورت:</b> <code>{data.get('port', DEFAULT_PORT)}</code>\n"
+        f"📦 <b>سقف حجم:</b> <b>{limit}</b>\n"
+        f"🚀 <b>سقف سرعت:</b> <b>{speed}</b>\n"
+        f"👥 <b>محدودیت کاربر:</b> <b>{iplim}</b>\n"
+        f"📅 <b>مدت اعتبار:</b> <b>{days_txt}</b>\n\n"
+        "روی دکمه‌ی «✅ ساخت کانفیگ» بزنید تا بلافاصله کانفیگ ساخته شود:"
     )
 
 # ── View builders ────────────────────────────────────────────────────────────
 def _format_detail(uid: str, l: dict) -> str:
     status = "🟢 فعال" if is_link_allowed(l) else "🔴 غیرفعال/منقضی"
-    limit = "نامحدود" if not l.get("limit_bytes") else fmt_bytes(l["limit_bytes"])
+    limit_val = l.get("limit_bytes", 0)
+    limit_txt = "نامحدود" if not limit_val else fmt_bytes(limit_val)
+    used_val = l.get("used_bytes", 0)
+    pct_txt = f" ({(used_val / limit_val * 100):.1f}%)" if limit_val > 0 else ""
     speed = "نامحدود" if not l.get("speed_limit_bytes") else f"{l['speed_limit_bytes']*8/1024/1024:.1f} Mbps"
     exp = l.get("expires_at")
-    exp_txt = exp.split("T")[0] if exp else "بدون انقضا"
+    if exp:
+        try:
+            exp_dt = datetime.fromisoformat(exp)
+            diff = exp_dt - datetime.now()
+            if diff.total_seconds() <= 0:
+                exp_txt = f"🔴 منقضی شده ({exp.split('T')[0]})"
+            else:
+                days_left = diff.days
+                hours_left = int(diff.seconds // 3600)
+                if days_left > 0:
+                    exp_txt = f"⏳ {days_left} روز و {hours_left} ساعت باقی‌مانده ({exp.split('T')[0]})"
+                else:
+                    exp_txt = f"⏳ {hours_left} ساعت باقی‌مانده"
+        except Exception:
+            exp_txt = exp.split("T")[0]
+    else:
+        exp_txt = "♾ بدون انقضا (دائمی)"
+
     proto = l.get("protocol", DEFAULT_PROTOCOL)
     alpn = l.get("alpn") or f"پیش‌فرض ({DEFAULT_ALPN_BY_PROTOCOL.get(proto, 'http/1.1')})"
     return (
-        f"<b>{l.get('label','?')}</b>\n"
+        f"<b>{_h(l.get('label','?'))}</b>\n"
         f"وضعیت: {status}\n"
-        f"مصرف: {fmt_bytes(l.get('used_bytes',0))} / {limit}\n"
-        f"محدودیت سرعت: {speed}\n"
-        f"محدودیت آی‌پی: {l.get('ip_limit',0) or 'نامحدود'}\n"
-        f"پروتکل: {_protocol_label(proto)}\n"
-        f"Fingerprint: {_fp_label(l.get('fingerprint', DEFAULT_FINGERPRINT))}\n"
-        f"ALPN: {alpn}\n"
-        f"پورت: {l.get('port', DEFAULT_PORT)}\n"
-        f"انقضا: {exp_txt}\n"
-        f"UUID: <code>{uid}</code>"
+        f"📊 مصرف ترافیک: <b>{fmt_bytes(used_val)}</b> / {limit_txt}{pct_txt}\n"
+        f"🚀 محدودیت سرعت: {speed}\n"
+        f"👥 محدودیت کاربر: {l.get('ip_limit',0) or 'نامحدود'}\n"
+        f"🌐 پروتکل: {_protocol_label(proto)}\n"
+        f"🖐 فینگرپرینت: {_fp_label(l.get('fingerprint', DEFAULT_FINGERPRINT))}\n"
+        f"🔤 ALPN: {alpn}\n"
+        f"🔌 پورت: {l.get('port', DEFAULT_PORT)}\n"
+        f"📅 تاریخ انقضا: {exp_txt}\n"
+        f"🆔 شناسه: <code>{uid}</code>"
     )
 
 # ── Sub-group (لینک ساب حرفه‌ای) view builders ────────────────────────────────
@@ -328,8 +403,8 @@ def _format_sub_detail(sid: str, s: dict) -> str:
     pw = "🔒 دارد" if s.get("password_hash") else "بدون رمز"
     desc = s.get("desc") or "—"
     return (
-        f"🗂 <b>{s.get('name','?')}</b>\n"
-        f"توضیحات: {desc}\n"
+        f"🗂 <b>{_h(s.get('name','?'))}</b>\n"
+        f"توضیحات: {_h(desc)}\n"
         f"تعداد کانفیگ‌های داخل گروه: {cnt}\n"
         f"رمز عبور: {pw}\n\n"
         f"🔗 لینک ساب حرفه‌ای این گروه:\n<code>{_group_public_url(s)}</code>"
@@ -404,8 +479,47 @@ async def _handle_message(msg: dict):
     text = (msg.get("text") or "").strip()
     if chat_id is None:
         return
+
     if not _is_admin(chat_id):
-        await _send(chat_id, "⛔ شما اجازه‌ی دسترسی به این ربات رو ندارید.")
+        if text.startswith("/auth"):
+            parts = text.split(None, 1)
+            if len(parts) > 1:
+                pw = parts[1].strip()
+                from main import AUTH, verify_password, save_state, BOT_SETTINGS
+                if verify_password(pw, AUTH.get("password_hash", "")):
+                    ADMIN_IDS.add(chat_id)
+                    BOT_SETTINGS["admin_ids"] = ",".join(str(x) for x in sorted(ADMIN_IDS))
+                    await save_state()
+                    await _send(
+                        chat_id,
+                        f"✅ <b>احراز هویت موفقیت‌آمیز بود!</b>\n"
+                        f"شما به عنوان ادمین مجاز پنل Technamooz ثبت شدید.\n"
+                        f"🆔 شناسه شما: <code>{chat_id}</code>\n\n"
+                        f"از منوی زیر برای مدیریت سرور استفاده کنید:",
+                        _main_menu_kb(),
+                    )
+                    return
+                else:
+                    await _send(chat_id, "❌ رمز وارد شده برای پنل صحیح نیست.")
+                    return
+            else:
+                await _send(
+                    chat_id,
+                    f"ℹ️ دستور احراز هویت ادمین:\n"
+                    f"<code>/auth &lt;رمز_پنل&gt;</code>\n\n"
+                    f"🆔 شناسه تلگرام شما: <code>{chat_id}</code>",
+                )
+                return
+
+        await _send(
+            chat_id,
+            f"⛔ <b>عدم دسترسی به پنل Technamooz</b>\n\n"
+            f"🆔 شناسه تلگرام شما:\n<code>{chat_id}</code>\n\n"
+            f"🔑 <b>اتصال سریع:</b>\n"
+            f"برای دسترسی فوری، دستور زیر را به همراه رمز ورود به پنل ارسال کنید:\n"
+            f"<code>/auth رمز_عبور_پنل</code>\n\n"
+            f"یا این شناسه (<code>{chat_id}</code>) را در بخش تنظیمات ربات تلگرام در وب‌پنل وارد کنید.",
+        )
         return
 
     if text in ("/start", "/menu"):
@@ -464,43 +578,43 @@ async def _handle_message(msg: dict):
                 return
             data["port"] = p
             pending["step"] = "volume"
-            await _send(chat_id, _wizard_prompt("volume", data), _wizard_unlimited_kb("volume"))
+            await _send(chat_id, _wizard_prompt("volume", data), _wizard_volume_kb())
             return
 
         if step == "volume":
             parsed = _parse_volume_text(text)
             if parsed is None:
-                await _send(chat_id, "❗️ فرمت درست نیست. مثلاً بفرست: <code>10GB</code> یا <code>500MB</code>", _wizard_unlimited_kb("volume"))
+                await _send(chat_id, "❗️ فرمت درست نیست. لطفاً از دکمه‌های زیر استفاده کنید یا مثلاً بفرستید: <code>10GB</code> یا <code>500MB</code>", _wizard_volume_kb())
                 return
             data["limit_bytes"] = parsed
             pending["step"] = "speed"
-            await _send(chat_id, _wizard_prompt("speed", data), _wizard_unlimited_kb("speed"))
+            await _send(chat_id, _wizard_prompt("speed", data), _wizard_speed_kb())
             return
 
         if step == "speed":
             parsed = _parse_speed_text(text)
             if parsed is None:
-                await _send(chat_id, "❗️ فرمت درست نیست. یه عدد بفرست، مثلاً <code>20</code> (Mbps)", _wizard_unlimited_kb("speed"))
+                await _send(chat_id, "❗️ فرمت درست نیست. لطفاً از دکمه‌های زیر استفاده کنید یا عددی بر حسب مگابیت بفرستید (مثلاً <code>20</code>)", _wizard_speed_kb())
                 return
             data["speed_limit_bytes"] = parsed
             pending["step"] = "iplimit"
-            await _send(chat_id, _wizard_prompt("iplimit", data), _wizard_unlimited_kb("iplimit"))
+            await _send(chat_id, _wizard_prompt("iplimit", data), _wizard_iplimit_kb())
             return
 
         if step == "iplimit":
             n = _parse_nonneg_int(text)
             if n is None:
-                await _send(chat_id, "❗️ یه عدد صحیح بفرست:", _wizard_unlimited_kb("iplimit"))
+                await _send(chat_id, "❗️ لطفاً یک عدد صحیح یا یکی از دکمه‌های زیر را انتخاب کنید:", _wizard_iplimit_kb())
                 return
             data["ip_limit"] = n
             pending["step"] = "days"
-            await _send(chat_id, _wizard_prompt("days", data), _wizard_unlimited_kb("days"))
+            await _send(chat_id, _wizard_prompt("days", data), _wizard_days_kb())
             return
 
         if step == "days":
             n = _parse_nonneg_int(text)
             if n is None:
-                await _send(chat_id, "❗️ یه عدد صحیح بفرست (تعداد روز):", _wizard_unlimited_kb("days"))
+                await _send(chat_id, "❗️ لطفاً تعداد روز را به عدد وارد کنید یا از دکمه‌های زیر انتخاب نمایید:", _wizard_days_kb())
                 return
             data["expires_days"] = n
             pending["step"] = "confirm"
@@ -509,6 +623,35 @@ async def _handle_message(msg: dict):
 
     # پیام ناشناخته → منو رو نشون بده
     await _send(chat_id, "از دکمه‌های زیر استفاده کن:", _main_menu_kb())
+
+async def _format_system_status():
+    from main import stats, connections, uptime, is_link_expired
+    async with LINKS_LOCK:
+        total_links = len(LINKS)
+        active_links = sum(1 for l in LINKS.values() if l.get("active", True) and not is_link_expired(l))
+        total_traffic = sum(l.get("used_bytes", 0) for l in LINKS.values())
+    async with SUBS_LOCK:
+        subs_count = len(SUBS)
+
+    server_total_bytes = max(stats.get("total_bytes", 0), total_traffic)
+    active_conns = len(connections)
+
+    txt = (
+        "📊 <b>وضعیت زنده سرور و سیستم Technamooz</b>\n\n"
+        f"⏱ <b>مدت زمان روشن بودن سرور (Uptime):</b> <code>{uptime()}</code>\n"
+        f"👥 <b>اتصالات آنلاین هم‌زمان:</b> <code>{active_conns}</code> اتصال\n"
+        f"📦 <b>کل ترافیک مصرف‌شده سرور:</b> <code>{fmt_bytes(server_total_bytes)}</code>\n"
+        f"📋 <b>تعداد کل کانفیگ‌ها:</b> <code>{total_links}</code> (فعال: <code>{active_links}</code>)\n"
+        f"🗂 <b>تعداد گروه‌های ساب:</b> <code>{subs_count}</code> گروه\n"
+        f"🌐 <b>درخواست‌های پردازش‌شده:</b> <code>{stats.get('total_requests', 0):,}</code>\n"
+        f"❌ <b>خطاهای ثبت‌شده:</b> <code>{stats.get('total_errors', 0)}</code>\n\n"
+        f"🕒 <i>بروزرسانی زنده: {datetime.now().strftime('%H:%M:%S')}</i>"
+    )
+    kb = {"inline_keyboard": [
+        [{"text": "🔄 به‌روزرسانی وضعیت", "callback_data": "sysstatus"}],
+        [{"text": "⬅ منوی اصلی", "callback_data": "menu"}],
+    ]}
+    return txt, kb
 
 async def _handle_callback(cb: dict):
     chat_id = cb.get("message", {}).get("chat", {}).get("id")
@@ -524,6 +667,11 @@ async def _handle_callback(cb: dict):
     if data == "menu":
         _pending.pop(chat_id, None)
         await _edit(chat_id, message_id, "منوی مدیریت Technamooz Panel:", _main_menu_kb())
+        return
+
+    if data == "sysstatus":
+        txt, kb = await _format_system_status()
+        await _edit(chat_id, message_id, txt, kb)
         return
 
     if data.startswith("list:"):
@@ -649,7 +797,7 @@ async def _handle_callback(cb: dict):
 
     if data == "newcfg":
         _pending[chat_id] = {"action": "wizard", "step": "label", "data": {}}
-        await _edit(chat_id, message_id, _wizard_prompt("label", {}), _wizard_cancel_kb())
+        await _edit(chat_id, message_id, _wizard_prompt("label", {}), _wizard_label_kb())
         return
 
     if data == "w:cancel":
@@ -665,6 +813,12 @@ async def _handle_callback(cb: dict):
 
         step = pending["step"]
         wdata = pending["data"]
+
+        if data == "w:skip:label" and step == "label":
+            wdata["label"] = f"کانفیگ Technamooz {len(LINKS)+1}"
+            pending["step"] = "protocol"
+            await _edit(chat_id, message_id, _wizard_prompt("protocol", wdata), _wizard_protocol_kb())
+            return
 
         if data.startswith("w:proto:") and step == "protocol":
             proto = data.split(":", 2)[2]
@@ -696,25 +850,55 @@ async def _handle_callback(cb: dict):
         if data == "w:skip:port" and step == "port":
             wdata["port"] = DEFAULT_PORT
             pending["step"] = "volume"
-            await _edit(chat_id, message_id, _wizard_prompt("volume", wdata), _wizard_unlimited_kb("volume"))
+            await _edit(chat_id, message_id, _wizard_prompt("volume", wdata), _wizard_volume_kb())
+            return
+
+        if data.startswith("w:volpreset:") and step == "volume":
+            vol_str = data.split(":", 2)[2]
+            parsed = _parse_volume_text(vol_str)
+            wdata["limit_bytes"] = parsed or 0
+            pending["step"] = "speed"
+            await _edit(chat_id, message_id, _wizard_prompt("speed", wdata), _wizard_speed_kb())
             return
 
         if data == "w:skip:volume" and step == "volume":
             wdata["limit_bytes"] = 0
             pending["step"] = "speed"
-            await _edit(chat_id, message_id, _wizard_prompt("speed", wdata), _wizard_unlimited_kb("speed"))
+            await _edit(chat_id, message_id, _wizard_prompt("speed", wdata), _wizard_speed_kb())
+            return
+
+        if data.startswith("w:speedpreset:") and step == "speed":
+            spd_str = data.split(":", 2)[2]
+            parsed = _parse_speed_text(spd_str)
+            wdata["speed_limit_bytes"] = parsed or 0
+            pending["step"] = "iplimit"
+            await _edit(chat_id, message_id, _wizard_prompt("iplimit", wdata), _wizard_iplimit_kb())
             return
 
         if data == "w:skip:speed" and step == "speed":
             wdata["speed_limit_bytes"] = 0
             pending["step"] = "iplimit"
-            await _edit(chat_id, message_id, _wizard_prompt("iplimit", wdata), _wizard_unlimited_kb("iplimit"))
+            await _edit(chat_id, message_id, _wizard_prompt("iplimit", wdata), _wizard_iplimit_kb())
+            return
+
+        if data.startswith("w:ippreset:") and step == "iplimit":
+            ip_str = data.split(":", 2)[2]
+            wdata["ip_limit"] = int(ip_str) if ip_str.isdigit() else 0
+            pending["step"] = "days"
+            await _edit(chat_id, message_id, _wizard_prompt("days", wdata), _wizard_days_kb())
             return
 
         if data == "w:skip:iplimit" and step == "iplimit":
             wdata["ip_limit"] = 0
             pending["step"] = "days"
-            await _edit(chat_id, message_id, _wizard_prompt("days", wdata), _wizard_unlimited_kb("days"))
+            await _edit(chat_id, message_id, _wizard_prompt("days", wdata), _wizard_days_kb())
+            return
+
+        if data.startswith("w:dayspreset:") and step == "days":
+            d_str = data.split(":", 2)[2]
+            wdata["expires_days"] = int(d_str) if d_str.isdigit() else 0
+            pending["step"] = "confirm"
+            await _edit(chat_id, message_id, _wizard_summary(wdata), _wizard_confirm_kb())
             return
 
         if data == "w:skip:days" and step == "days":
@@ -724,22 +908,38 @@ async def _handle_callback(cb: dict):
             return
 
         if data == "w:confirm" and step == "confirm":
-            expires_days = wdata.get("expires_days", 0)
-            expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat() if expires_days > 0 else None
-            uid, link = await make_link(
-                label=wdata.get("label") or "کانفیگ جدید",
-                limit_bytes=wdata.get("limit_bytes", 0),
-                expires_at=expires_at,
-                protocol=wdata.get("protocol", DEFAULT_PROTOCOL),
-                fingerprint=wdata.get("fingerprint", DEFAULT_FINGERPRINT),
-                alpn=wdata.get("alpn", ""),
-                port=wdata.get("port", DEFAULT_PORT),
-                ip_limit=wdata.get("ip_limit", 0),
-                speed_limit_bytes=wdata.get("speed_limit_bytes", 0),
-            )
-            _pending.pop(chat_id, None)
-            await _edit(chat_id, message_id, f"✅ کانفیگ ساخته شد.\n\n{_format_detail(uid, link)}", _link_detail_kb(uid, link["active"]))
-            return
+            try:
+                expires_days = float(wdata.get("expires_days", 0) or 0)
+                expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat() if expires_days > 0 else None
+                label_val = (wdata.get("label") or f"کانفیگ Technamooz {len(LINKS)+1}").strip()
+                uid, link = await make_link(
+                    label=label_val,
+                    limit_bytes=int(wdata.get("limit_bytes", 0) or 0),
+                    expires_at=expires_at,
+                    protocol=wdata.get("protocol") or DEFAULT_PROTOCOL,
+                    fingerprint=wdata.get("fingerprint") or DEFAULT_FINGERPRINT,
+                    alpn=wdata.get("alpn", ""),
+                    port=int(wdata.get("port", DEFAULT_PORT) or DEFAULT_PORT),
+                    ip_limit=int(wdata.get("ip_limit", 0) or 0),
+                    speed_limit_bytes=int(wdata.get("speed_limit_bytes", 0) or 0),
+                )
+                _pending.pop(chat_id, None)
+                host = get_host()
+                vless = vless_link_for_link(link, uid, host)
+                sub_url = f"https://{host}/sub/{uid}"
+                success_text = (
+                    f"🎉 <b>کانفیگ با موفقیت در سیستم ساخته شد!</b>\n\n"
+                    f"{_format_detail(uid, link)}\n\n"
+                    f"🔗 <b>لینک اتصال مستقیم:</b>\n<code>{vless}</code>\n\n"
+                    f"📥 <b>لینک سابسکریپشن:</b>\n<code>{sub_url}</code>"
+                )
+                await _edit(chat_id, message_id, success_text, _link_detail_kb(uid, link["active"]))
+                return
+            except Exception as e:
+                logger.exception("Error making link from telegram wizard: %s", e)
+                _pending.pop(chat_id, None)
+                await _edit(chat_id, message_id, f"❌ <b>خطا در ساخت کانفیگ:</b>\n<code>{str(e)}</code>", _main_menu_kb())
+                return
 
         # هیچ‌کدوم از حالت‌های بالا مچ نشد (مثلاً روی دکمه‌ی مرحله‌ی قبلی که دیگه معتبر نیست زده)
         await _answer_cb(cb_id, "این دکمه دیگه معتبر نیست.")
@@ -760,6 +960,44 @@ async def _handle_callback(cb: dict):
         if not l:
             await _edit(chat_id, message_id, "این کانفیگ دیگه وجود نداره.", _main_menu_kb())
             return
+        await _edit(chat_id, message_id, _format_detail(uid, l), _link_detail_kb(uid, l["active"]))
+        return
+
+    if data.startswith("clashsingbox:"):
+        uid = data.split(":", 1)[1]
+        l = LINKS.get(uid)
+        if not l:
+            await _answer_cb(cb_id, "کانفیگ پیدا نشد")
+            return
+        host = get_host()
+        clash_url = f"https://{host}/sub/{uid}/clash"
+        singbox_url = f"https://{host}/sub/{uid}/singbox"
+        msg = (
+            f"⚡ <b>لینک‌های اشتراک هوشمند برای «{l.get('label')}»</b>\n\n"
+            f"🐱 <b>Clash Meta / Mihomo (YAML):</b>\n<code>{clash_url}</code>\n\n"
+            f"📦 <b>Sing-box (JSON):</b>\n<code>{singbox_url}</code>\n\n"
+            f"💡 این لینک‌ها را در کلاینت‌های سازگار وارد کنید تا اتصال به صورت خودکار لود شود."
+        )
+        await _send(chat_id, msg)
+        return
+
+    if data.startswith("resetusage:"):
+        uid = data.split(":", 1)[1]
+        l = await reset_link_usage_helper(uid)
+        if not l:
+            await _answer_cb(cb_id, "کانفیگ پیدا نشد")
+            return
+        await _answer_cb(cb_id, "✅ مصرف کانفیگ صفر شد")
+        await _edit(chat_id, message_id, _format_detail(uid, l), _link_detail_kb(uid, l["active"]))
+        return
+
+    if data.startswith("renewlink:"):
+        uid = data.split(":", 1)[1]
+        l = await renew_link_helper(uid, 30)
+        if not l:
+            await _answer_cb(cb_id, "کانفیگ پیدا نشد")
+            return
+        await _answer_cb(cb_id, "✅ اعتبار کانفیگ ۳۰ روز تمدید شد")
         await _edit(chat_id, message_id, _format_detail(uid, l), _link_detail_kb(uid, l["active"]))
         return
 
@@ -827,15 +1065,25 @@ async def _poll_loop():
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 async def start_bot():
-    global _client, _poll_task, _running
+    global _client, _poll_task, _running, BOT_TOKEN, ADMIN_IDS, API_BASE
+    from main import BOT_SETTINGS
+    if not BOT_TOKEN and BOT_SETTINGS.get("token"):
+        BOT_TOKEN = BOT_SETTINGS["token"].strip()
+        API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    if not ADMIN_IDS and BOT_SETTINGS.get("admin_ids"):
+        raw = BOT_SETTINGS["admin_ids"]
+        ADMIN_IDS = {int(x) for x in raw.replace(" ", "").split(",") if x.isdigit()}
     if not BOT_TOKEN:
         logger.info("Telegram bot: TELEGRAM_BOT_TOKEN تنظیم نشده، ربات غیرفعاله.")
         return
     if not ADMIN_IDS:
-        logger.warning("Telegram bot: TELEGRAM_ADMIN_IDS تنظیم نشده، هیچ‌کس اجازه‌ی مدیریت نداره (ربات روشنه ولی همه رد می‌شن).")
-    _client = httpx.AsyncClient(timeout=httpx.Timeout(40.0, connect=10.0))
+        logger.warning("Telegram bot: TELEGRAM_ADMIN_IDS خالی است. ادمین می‌تواند با /auth رمز پنل را ارسال و احراز هویت شود.")
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(40.0, connect=10.0))
     _running = True
-    _poll_task = asyncio.create_task(_poll_loop())
+    if _poll_task is None or _poll_task.done():
+        _poll_task = asyncio.create_task(_poll_loop())
+    logger.info("Telegram bot started successfully.")
 
 async def stop_bot():
     global _running, _client
